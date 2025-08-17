@@ -4,24 +4,17 @@ from tkinter import ttk, filedialog, messagebox
 
 # Define available patterns at the module level for reusability
 PATTERNS = [
-    "RGB Stripes", "Color Bars", "Vertical Gradient", "Horizontal Gradient",
-    "Grayscale Bars", "Checkerboard", "Solid Red", "Solid Green", "Solid Blue",
-    "Solid White", "Solid Black", "Solid Custom Color"
+    "Solid Color", "RGB Stripes", "Checkerboard", "Vertical Gradient",
+    "Horizontal Gradient", "Color Bars", "Grayscale Bars"
 ]
-
-SOLID_COLORS = {
-    "Solid Red": (255, 0, 0),
-    "Solid Green": (0, 255, 0),
-    "Solid Blue": (0, 0, 255),
-    "Solid White": (255, 255, 255),
-    "Solid Black": (0, 0, 0),
-}
 
 def _pack_pixel(rgb_tuple: tuple[int, int, int], pixel_order: str) -> bytes:
     """Packs an RGB tuple into bytes based on the specified pixel order."""
     return struct.pack('<BBB', rgb_tuple[2], rgb_tuple[1], rgb_tuple[0]) if pixel_order == "BGR" else struct.pack('<BBB', *rgb_tuple)
 
-def generate_bmp(filename: str, width: int, height: int, pattern: str, pixel_order: str = "BGR", custom_color: tuple[int, int, int] | None = None) -> None:
+def generate_bmp(filename: str, width: int, height: int, pattern: str,
+                 pixel_order: str = "BGR", # type: ignore
+                 pattern_options: dict | None = None) -> None: # type: ignore
     """
     Generates a 24-bit BMP file with a specified pattern.
     Supported patterns are useful for display testing, such as solid colors,
@@ -35,8 +28,8 @@ def generate_bmp(filename: str, width: int, height: int, pattern: str, pixel_ord
         pattern: The pattern to generate (e.g., "RGB Stripes", "Color Bars").
         pixel_order: The order of pixel color components. "BGR" or "RGB".
                      Defaults to "BGR".
-        custom_color: An (R, G, B) tuple for the "Solid Custom Color" pattern.
-                      Defaults to None.
+        pattern_options: A dictionary with pattern-specific options, like custom
+                         colors. Defaults to None.
 
     Returns:
         None. Raises an exception if generation fails.
@@ -55,9 +48,9 @@ def generate_bmp(filename: str, width: int, height: int, pattern: str, pixel_ord
         raise ValueError("Pixel order must be 'BGR' or 'RGB'.")
     if pattern not in PATTERNS:
         raise ValueError(f"Invalid pattern '{pattern}'. Valid patterns are: {', '.join(PATTERNS)}")
-    if pattern == "Solid Custom Color":
-        if custom_color is None or not all(isinstance(c, int) and 0 <= c <= 255 for c in custom_color):
-            raise ValueError("A valid (R, G, B) tuple with values between 0-255 must be provided for custom color.")
+
+    # Ensure pattern_options is a dictionary for safe access
+    options = pattern_options or {} # type: ignore
 
     # BMP constants
     FILE_HEADER_SIZE = 14
@@ -99,12 +92,13 @@ def generate_bmp(filename: str, width: int, height: int, pattern: str, pixel_ord
             # --- Pixel Data (Optimized Row-by-Row Generation) ---
             padding_bytes = b'\x00' * padding
             CHECKER_SIZE = 16 # Size of each square in the checkerboard
+            
 
             # For patterns that are constant vertically, we generate the row once.
             if pattern not in ["Vertical Gradient", "Checkerboard"]:
                 row_data = bytearray()
 
-                # Pre-calculate values for horizontal patterns
+                # Get colors from options with sensible defaults
                 if pattern == "Color Bars":
                     colors_rgb = [
                         (255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
@@ -112,19 +106,20 @@ def generate_bmp(filename: str, width: int, height: int, pattern: str, pixel_ord
                     ]
                     bar_width = width / 8
                 elif pattern == "RGB Stripes":
+                    color1 = options.get('color1', (255, 0, 0))
+                    color2 = options.get('color2', (0, 255, 0))
+                    color3 = options.get('color3', (0, 0, 255))
                     stripe1_end_x = width // 3
                     stripe2_end_x = 2 * (width // 3)
 
                 for x in range(width):
                     current_color_tuple_rgb = (0, 0, 0)
-                    if pattern == "Solid Custom Color":
-                        current_color_tuple_rgb = custom_color
-                    elif pattern in SOLID_COLORS:
-                        current_color_tuple_rgb = SOLID_COLORS[pattern]
+                    if pattern == "Solid Color":
+                        current_color_tuple_rgb = options.get('color', (0, 0, 0))
                     elif pattern == "RGB Stripes":
-                        if x < stripe1_end_x: current_color_tuple_rgb = (255, 0, 0)
-                        elif x < stripe2_end_x: current_color_tuple_rgb = (0, 255, 0)
-                        else: current_color_tuple_rgb = (0, 0, 255)
+                        if x < stripe1_end_x: current_color_tuple_rgb = color1
+                        elif x < stripe2_end_x: current_color_tuple_rgb = color2
+                        else: current_color_tuple_rgb = color3
                     elif pattern == "Color Bars":
                         bar_index = int(x // bar_width)
                         current_color_tuple_rgb = colors_rgb[min(bar_index, 7)]
@@ -135,8 +130,13 @@ def generate_bmp(filename: str, width: int, height: int, pattern: str, pixel_ord
                         val = 255 - int(bar_index * (255 / 7))
                         current_color_tuple_rgb = (val, val, val)
                     elif pattern == "Horizontal Gradient":
-                        val = int(255 * x / (width - 1)) if width > 1 else 255
-                        current_color_tuple_rgb = (val, val, val)
+                        start_color = options.get('start_color', (0, 0, 0))
+                        end_color = options.get('end_color', (255, 255, 255))
+                        ratio = x / (width - 1) if width > 1 else 1.0
+                        r = int(start_color[0] * (1 - ratio) + end_color[0] * ratio)
+                        g = int(start_color[1] * (1 - ratio) + end_color[1] * ratio)
+                        b = int(start_color[2] * (1 - ratio) + end_color[2] * ratio)
+                        current_color_tuple_rgb = (r, g, b)
 
                     row_data.extend(_pack_pixel(current_color_tuple_rgb, pixel_order))
 
@@ -145,23 +145,36 @@ def generate_bmp(filename: str, width: int, height: int, pattern: str, pixel_ord
                     f.write(full_row_bytes)
 
             elif pattern == "Vertical Gradient":
+                start_color = options.get('start_color', (0, 0, 0))
+                end_color = options.get('end_color', (255, 255, 255))
                 for y in range(height):
-                    val = int(255 * y / (height - 1)) if height > 1 else 255
-                    current_color_tuple_rgb = (val, val, val)
+                    ratio = y / (height - 1) if height > 1 else 1.0
+                    r = int(start_color[0] * (1 - ratio) + end_color[0] * ratio)
+                    g = int(start_color[1] * (1 - ratio) + end_color[1] * ratio)
+                    b = int(start_color[2] * (1 - ratio) + end_color[2] * ratio)
+                    current_color_tuple_rgb = (r, g, b)
                     pixel_bytes = _pack_pixel(current_color_tuple_rgb, pixel_order)
                     f.write(pixel_bytes * width + padding_bytes)
             
             elif pattern == "Checkerboard":
-                color1 = (255, 255, 255) # White
-                color2 = (0, 0, 0)       # Black
+                color1 = options.get('color1', (255, 255, 255)) # Default White
+                color2 = options.get('color2', (0, 0, 0))       # Default Black
                 pixel1_bytes = _pack_pixel(color1, pixel_order)
                 pixel2_bytes = _pack_pixel(color2, pixel_order)
+
+                # Pre-generate the two possible row types for efficiency
+                row1_data = bytearray()
+                row2_data = bytearray()
+                for x in range(width):
+                    is_color1_in_row1 = (x // CHECKER_SIZE) % 2 == 0
+                    row1_data.extend(pixel1_bytes if is_color1_in_row1 else pixel2_bytes)
+                    row2_data.extend(pixel2_bytes if is_color1_in_row1 else pixel1_bytes)
+                row1_bytes = bytes(row1_data) + padding_bytes
+                row2_bytes = bytes(row2_data) + padding_bytes
+
                 for y in range(height):
-                    row_data = bytearray()
-                    for x in range(width):
-                        is_color1 = ((x // CHECKER_SIZE) + (y // CHECKER_SIZE)) % 2 == 0
-                        row_data.extend(pixel1_bytes if is_color1 else pixel2_bytes)
-                    f.write(bytes(row_data) + padding_bytes)
+                    is_row1_type = (y // CHECKER_SIZE) % 2 == 0
+                    f.write(row1_bytes if is_row1_type else row2_bytes)
 
         # If no exceptions were raised, generation is considered successful.
 
@@ -169,6 +182,20 @@ def generate_bmp(filename: str, width: int, height: int, pattern: str, pixel_ord
         raise IOError(f"Error writing file '{filename}': {e}")
     except Exception as e:
         raise Exception(f"Unexpected error generating BMP file '{filename}': {e}")
+
+def _prompt_for_color(prompt_text: str) -> tuple[int, int, int]:
+    """Helper function for CLI to prompt for an RGB color."""
+    print(f"--- Enter values for {prompt_text} ---")
+    while True:
+        try:
+            r = int(input("  Enter Red value (0-255): "))
+            g = int(input("  Enter Green value (0-255): "))
+            b = int(input("  Enter Blue value (0-255): "))
+            if not all(0 <= c <= 255 for c in [r, g, b]):
+                raise ValueError("Values must be between 0 and 255.")
+            return (r, g, b)
+        except ValueError as e:
+            print(f"Invalid input: {e}. Please try again.")
 
 def main_cli(): # Renamed original main function for command-line usage
     try:
@@ -194,20 +221,20 @@ def main_cli(): # Renamed original main function for command-line usage
         elif pattern_input not in PATTERNS:
             print(f"Invalid pattern '{pattern_input}'. Using default '{PATTERNS[0]}'.")
             pattern_input = PATTERNS[0]
-        
-        custom_color_tuple = None
-        if pattern_input == "Solid Custom Color":
-            while True:
-                try:
-                    r = int(input("Enter Red value (0-255): "))
-                    g = int(input("Enter Green value (0-255): "))
-                    b = int(input("Enter Blue value (0-255): "))
-                    if not all(0 <= c <= 255 for c in [r, g, b]):
-                        raise ValueError("Values must be between 0 and 255.")
-                    custom_color_tuple = (r, g, b)
-                    break
-                except ValueError as e:
-                    print(f"Invalid input: {e}. Please try again.")
+
+        pattern_options = {}
+        if pattern_input == "Solid Color":
+            pattern_options['color'] = _prompt_for_color("Solid Color")
+        elif pattern_input == "Checkerboard":
+            pattern_options['color1'] = _prompt_for_color("Color 1")
+            pattern_options['color2'] = _prompt_for_color("Color 2")
+        elif "Gradient" in pattern_input:
+            pattern_options['start_color'] = _prompt_for_color("Start Color")
+            pattern_options['end_color'] = _prompt_for_color("End Color")
+        elif pattern_input == "RGB Stripes":
+            pattern_options['color1'] = _prompt_for_color("Stripe 1 Color (R)")
+            pattern_options['color2'] = _prompt_for_color("Stripe 2 Color (G)")
+            pattern_options['color3'] = _prompt_for_color("Stripe 3 Color (B)")
 
         pixel_order_input = input("Enter pixel order (BGR or RGB, default BGR): ").strip().upper()
         if not pixel_order_input:
@@ -216,18 +243,31 @@ def main_cli(): # Renamed original main function for command-line usage
             print(f"Invalid pixel order '{pixel_order_input}'. Using default BGR.")
             pixel_order_input = "BGR"
 
-        if custom_color_tuple:
-            safe_pattern_name = f"custom_{custom_color_tuple[0]}-{custom_color_tuple[1]}-{custom_color_tuple[2]}"
-        else:
-            safe_pattern_name = pattern_input.lower().replace(' ', '_')
+        safe_pattern_name = pattern_input.lower().replace(' ', '_')
         output_filename = f"{safe_pattern_name}_{width}x{height}_{pixel_order_input}.bmp"
         print(f"\nGenerating '{output_filename}'...")
-        generate_bmp(output_filename, width, height, pattern_input, pixel_order_input, custom_color=custom_color_tuple)
+        generate_bmp(output_filename, width, height, pattern_input, pixel_order_input, pattern_options=pattern_options)
         print("Done.")
     except ValueError:
         print("Invalid input. Please enter numbers for width/height, or check pattern/pixel order.")
     except Exception as e:
         print(f"Main program error: {e}")
+
+class ColorInputFrame(ttk.Frame):
+    """A reusable frame for entering an RGB color."""
+    def __init__(self, parent, label_text: str, default_colors: tuple[int, int, int]):
+        super().__init__(parent)
+        self.r_var = tk.StringVar(value=str(default_colors[0]))
+        self.g_var = tk.StringVar(value=str(default_colors[1]))
+        self.b_var = tk.StringVar(value=str(default_colors[2]))
+
+        ttk.Label(self, text=f"{label_text}:").pack(side="left", padx=(0, 5))
+        ttk.Label(self, text="R:").pack(side="left")
+        ttk.Entry(self, textvariable=self.r_var, width=4).pack(side="left", padx=(0, 5))
+        ttk.Label(self, text="G:").pack(side="left")
+        ttk.Entry(self, textvariable=self.g_var, width=4).pack(side="left", padx=(0, 5))
+        ttk.Label(self, text="B:").pack(side="left")
+        ttk.Entry(self, textvariable=self.b_var, width=4).pack(side="left")
 
 class BmpGeneratorApp:
     def __init__(self, master: tk.Tk):
@@ -243,7 +283,7 @@ class BmpGeneratorApp:
         style.configure("TCombobox", padding=5)
 
         # Main frame for input widgets
-        input_frame = ttk.Frame(master, padding="10 10 10 10")
+        input_frame = ttk.Frame(master, padding="10 10 10 0")
         input_frame.grid(row=0, column=0, sticky="nsew")
 
         # Width input
@@ -261,36 +301,46 @@ class BmpGeneratorApp:
         # Pattern selection
         ttk.Label(input_frame, text="Pattern:").grid(row=2, column=0, sticky="w", pady=2)
         self.pattern_var = tk.StringVar(value=PATTERNS[0]) # Default value
-        self.pattern_combo = ttk.Combobox(input_frame, textvariable=self.pattern_var, values=PATTERNS, state="readonly", width=12)
+        self.pattern_combo = ttk.Combobox(input_frame, textvariable=self.pattern_var, values=PATTERNS, state="readonly", width=20)
         self.pattern_combo.grid(row=2, column=1, sticky="ew", pady=2)
 
-        # --- Custom Color Frame (initially hidden) ---
-        self.custom_color_frame = ttk.Frame(input_frame)
-        self.custom_color_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=2)
+        # --- Container for dynamic pattern options ---
+        self.options_container = ttk.Frame(master, padding="10 5 10 10")
+        self.options_container.grid(row=1, column=0, sticky="nsew")
+        self.option_frames = {}
 
-        ttk.Label(self.custom_color_frame, text="R:").pack(side="left", padx=(0, 2))
-        self.r_var = tk.StringVar(value="255")
-        ttk.Entry(self.custom_color_frame, textvariable=self.r_var, width=4).pack(side="left", padx=(0, 5))
+        # Create option frames for each pattern that needs them
+        self.option_frames["Solid Color"] = [
+            ColorInputFrame(self.options_container, "Color", (255, 255, 255))
+        ]
+        self.option_frames["RGB Stripes"] = [
+            ColorInputFrame(self.options_container, "Stripe 1", (255, 0, 0)),
+            ColorInputFrame(self.options_container, "Stripe 2", (0, 255, 0)),
+            ColorInputFrame(self.options_container, "Stripe 3", (0, 0, 255))
+        ]
+        self.option_frames["Checkerboard"] = [
+            ColorInputFrame(self.options_container, "Color 1", (255, 255, 255)),
+            ColorInputFrame(self.options_container, "Color 2", (0, 0, 0))
+        ]
+        self.option_frames["Vertical Gradient"] = self.option_frames["Horizontal Gradient"] = [
+            ColorInputFrame(self.options_container, "Start", (0, 0, 0)),
+            ColorInputFrame(self.options_container, "End", (255, 255, 255))
+        ]
 
-        ttk.Label(self.custom_color_frame, text="G:").pack(side="left", padx=(0, 2))
-        self.g_var = tk.StringVar(value="255")
-        ttk.Entry(self.custom_color_frame, textvariable=self.g_var, width=4).pack(side="left", padx=(0, 5))
-
-        ttk.Label(self.custom_color_frame, text="B:").pack(side="left", padx=(0, 2))
-        self.b_var = tk.StringVar(value="0")
-        ttk.Entry(self.custom_color_frame, textvariable=self.b_var, width=4).pack(side="left")
-
-        self.custom_color_frame.grid_remove() # Hide by default
+        # Pack all frames but hide them initially
+        for frames in self.option_frames.values():
+            for frame in frames:
+                frame.pack(anchor="w", pady=2, fill="x")
 
         # Pixel order selection
-        ttk.Label(input_frame, text="Pixel Order:").grid(row=4, column=0, sticky="w", pady=2) # Pixel Order
+        ttk.Label(input_frame, text="Pixel Order:").grid(row=3, column=0, sticky="w", pady=2) # Pixel Order
         self.pixel_order_var = tk.StringVar(value="BGR") # Default value
         self.pixel_order_combo = ttk.Combobox(input_frame, textvariable=self.pixel_order_var, values=["BGR", "RGB"], state="readonly", width=12)
-        self.pixel_order_combo.grid(row=4, column=1, sticky="ew", pady=2)
+        self.pixel_order_combo.grid(row=3, column=1, sticky="ew", pady=2)
 
         # Frame for the generate button
         button_frame = ttk.Frame(master, padding="10 0 10 10")
-        button_frame.grid(row=1, column=0, sticky="ew")
+        button_frame.grid(row=2, column=0, sticky="ew")
 
         # Generate button
         self.generate_button = ttk.Button(button_frame, text="Generate BMP", command=self.trigger_generate_bmp) # Generate BMP
@@ -303,13 +353,20 @@ class BmpGeneratorApp:
         self.width_entry.focus()
         # Bind event to handle showing/hiding the custom color frame
         self.pattern_combo.bind("<<ComboboxSelected>>", self.on_pattern_change)
+        # Initial call to set the correct UI state
+        self.on_pattern_change()
 
     def on_pattern_change(self, event=None):
         """Shows or hides the custom color input fields based on pattern selection."""
-        if self.pattern_var.get() == "Solid Custom Color":
-            self.custom_color_frame.grid()
-        else:
-            self.custom_color_frame.grid_remove()
+        selected_pattern = self.pattern_var.get()
+        # Hide all option frames first
+        for frames in self.option_frames.values():
+            for frame in frames:
+                frame.pack_forget()
+        # Show the frames for the selected pattern
+        if selected_pattern in self.option_frames:
+            for frame in self.option_frames[selected_pattern]:
+                frame.pack(anchor="w", pady=2, fill="x")
 
     def trigger_generate_bmp(self):
         """Handles the 'Generate BMP' button click event."""
@@ -318,7 +375,7 @@ class BmpGeneratorApp:
             height_str = self.height_var.get()
             pattern = self.pattern_var.get()
             pixel_order = self.pixel_order_var.get()
-            custom_color_tuple = None
+            pattern_options = {}
 
             if not width_str or not height_str:
                 messagebox.showerror("Input Error: Width and height cannot be empty.") # Input Error: Width and height cannot be empty.
@@ -332,25 +389,30 @@ class BmpGeneratorApp:
             if not (width > 0 and height > 0):
                  messagebox.showerror("Input Error: Width and height must be positive integers.") # Input Error: Width and height must be positive integers.
                  return
-            
-            if pattern == "Solid Custom Color":
-                r = int(self.r_var.get())
-                g = int(self.g_var.get())
-                b = int(self.b_var.get())
-                if not all(0 <= c <= 255 for c in [r, g, b]):
-                    messagebox.showerror("Invalid Color", "R, G, B values must be integers between 0 and 255.")
-                    return
-                custom_color_tuple = (r, g, b)
+
+            # Collect colors from the visible option frames
+            if pattern in self.option_frames:
+                frames = self.option_frames[pattern]
+                color_keys = []
+                if pattern == "Solid Color": color_keys = ["color"]
+                elif pattern == "Checkerboard": color_keys = ["color1", "color2"]
+                elif "Gradient" in pattern: color_keys = ["start_color", "end_color"]
+                elif pattern == "RGB Stripes": color_keys = ["color1", "color2", "color3"]
+
+                for i, key in enumerate(color_keys):
+                    r = int(frames[i].r_var.get())
+                    g = int(frames[i].g_var.get())
+                    b = int(frames[i].b_var.get())
+                    if not all(0 <= c <= 255 for c in [r, g, b]):
+                        messagebox.showerror("Invalid Color", f"Values for '{key}' must be integers between 0 and 255.")
+                        return
+                    pattern_options[key] = (r, g, b)
 
         except ValueError: # Catches int conversion error
-            messagebox.showerror("Invalid Input", "Width, height, and color values must be valid integers.") # Invalid Input: Width and height must be valid numbers.
+            messagebox.showerror("Invalid Input", "Width, height, and color values must be valid integers.")
             return
 
-        if custom_color_tuple:
-            safe_pattern_name = f"custom_{custom_color_tuple[0]}-{custom_color_tuple[1]}-{custom_color_tuple[2]}"
-        else:
-            safe_pattern_name = pattern.lower().replace(' ', '_')
-
+        safe_pattern_name = pattern.lower().replace(' ', '_')
         suggested_filename = f"{safe_pattern_name}_{width}x{height}_{pixel_order}.bmp"
         output_filename = filedialog.asksaveasfilename(
             defaultextension=".bmp",
@@ -364,8 +426,7 @@ class BmpGeneratorApp:
 
         try:
             generate_bmp(
-                output_filename, width, height, pattern, pixel_order,
-                custom_color=custom_color_tuple
+                output_filename, width, height, pattern, pixel_order, pattern_options
             )
             success_message = f"BMP file '{output_filename}' generated successfully.\n(Pattern: {pattern}, {width}x{height}, {pixel_order})"
             messagebox.showinfo("Success", success_message)
