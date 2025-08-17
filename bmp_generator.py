@@ -12,6 +12,71 @@ def _pack_pixel(rgb_tuple: tuple[int, int, int], pixel_order: str) -> bytes:
     """Packs an RGB tuple into bytes based on the specified pixel order."""
     return struct.pack('<BBB', rgb_tuple[2], rgb_tuple[1], rgb_tuple[0]) if pixel_order == "BGR" else struct.pack('<BBB', *rgb_tuple)
 
+def _generate_pixel_rows(width: int, height: int, pattern: str, pattern_options: dict | None = None):
+    """
+    A generator that yields pixel data row by row.
+    This centralizes the image generation logic to be used by both
+    file generation and preview generation, avoiding code duplication.
+    """
+    options = pattern_options or {}
+    CHECKER_SIZE = 16
+
+    # --- Patterns that are constant vertically ---
+    if pattern not in ["Vertical Gradient", "Checkerboard"]:
+        row_data = bytearray()
+        # Pre-calculate values for horizontal patterns
+        if pattern == "Color Bars":
+            colors_rgb = [
+                (255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
+                (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)
+            ]
+            bar_width = width / 8
+        elif pattern == "RGB Stripes":
+            color1 = options.get('color1', (255, 0, 0))
+            color2 = options.get('color2', (0, 255, 0))
+            color3 = options.get('color3', (0, 0, 255))
+            stripe1_end_x = width // 3
+            stripe2_end_x = 2 * (width // 3)
+
+        for x in range(width):
+            if pattern == "Solid Color": current_color = options.get('color', (0, 0, 0))
+            elif pattern == "RGB Stripes":
+                if x < stripe1_end_x: current_color = color1
+                elif x < stripe2_end_x: current_color = color2
+                else: current_color = color3
+            elif pattern == "Color Bars": current_color = colors_rgb[min(int(x // bar_width), 7)]
+            elif pattern == "Grayscale Bars":
+                # Use the same robust bar calculation as Color Bars for edge cases
+                bar_width_gray = width / 8
+                bar_index = min(int(x // bar_width_gray), 7)
+                val = 255 - int(bar_index * (255 / 7))
+                current_color = (val, val, val)
+            elif pattern == "Horizontal Gradient":
+                start_color = options.get('start_color', (0, 0, 0))
+                end_color = options.get('end_color', (255, 255, 255))
+                ratio = x / (width - 1) if width > 1 else 1.0
+                current_color = tuple(int(s * (1 - ratio) + e * ratio) for s, e in zip(start_color, end_color))
+            row_data.extend(struct.pack('BBB', *current_color))
+
+        # For vertically constant patterns, yield the same row 'height' times.
+        for _ in range(height):
+            yield bytes(row_data) # Yield a copy of the row data
+
+    # --- Patterns that change vertically ---
+    elif pattern == "Vertical Gradient":
+        start_color = options.get('start_color', (0, 0, 0))
+        end_color = options.get('end_color', (255, 255, 255))
+        for y in range(height):
+            ratio = y / (height - 1) if height > 1 else 1.0
+            current_color = tuple(int(s * (1 - ratio) + e * ratio) for s, e in zip(start_color, end_color))
+            yield struct.pack('BBB', *current_color) * width
+    elif pattern == "Checkerboard":
+        color1, color2 = options.get('color1', (255, 255, 255)), options.get('color2', (0, 0, 0))
+        row1 = b''.join(struct.pack('BBB', *(color1 if (x // CHECKER_SIZE) % 2 == 0 else color2)) for x in range(width))
+        row2 = b''.join(struct.pack('BBB', *(color2 if (x // CHECKER_SIZE) % 2 == 0 else color1)) for x in range(width))
+        for y in range(height):
+            yield row1 if (y // CHECKER_SIZE) % 2 == 0 else row2
+
 def generate_bmp(filename: str, width: int, height: int, pattern: str,
                  pixel_order: str = "BGR", # type: ignore
                  pattern_options: dict | None = None) -> None: # type: ignore
@@ -50,25 +115,21 @@ def generate_bmp(filename: str, width: int, height: int, pattern: str,
         raise ValueError(f"Invalid pattern '{pattern}'. Valid patterns are: {', '.join(PATTERNS)}")
 
     # Ensure pattern_options is a dictionary for safe access
-    options = pattern_options or {} # type: ignore
+    options = pattern_options or {}
 
     # BMP constants
     FILE_HEADER_SIZE = 14
     INFO_HEADER_SIZE = 40  # BITMAPINFOHEADER size
     BITS_PER_PIXEL = 24
+    bytes_per_pixel = BITS_PER_PIXEL // 8
+    row_size_unpadded = width * bytes_per_pixel
+    padding = (4 - (row_size_unpadded % 4)) % 4
+    row_size_padded = row_size_unpadded + padding
+    image_data_size = row_size_padded * height
+    file_size = FILE_HEADER_SIZE + INFO_HEADER_SIZE + image_data_size
 
     try:
         with open(filename, 'wb') as f:
-            # Calculate row size and padding
-            # Each row's data must be a multiple of 4 bytes.
-            bytes_per_pixel = BITS_PER_PIXEL // 8
-            row_size_unpadded = width * bytes_per_pixel
-            padding = (4 - (row_size_unpadded % 4)) % 4
-            row_size_padded = row_size_unpadded + padding
-
-            image_data_size = row_size_padded * height
-            file_size = FILE_HEADER_SIZE + INFO_HEADER_SIZE + image_data_size
-
             # --- BMP File Header (14 bytes) ---
             f.write(b'BM')                                  # Signature
             f.write(struct.pack('<L', file_size))           # File size (unsigned long)
@@ -89,99 +150,39 @@ def generate_bmp(filename: str, width: int, height: int, pattern: str,
             f.write(struct.pack('<L', 0))                   # Number of colors in palette (0 for 24-bit) (unsigned long)
             f.write(struct.pack('<L', 0))                   # Number of important colors (0 = all important) (unsigned long)
 
-            # --- Pixel Data (Optimized Row-by-Row Generation) ---
+            # --- Pixel Data ---
             padding_bytes = b'\x00' * padding
-            CHECKER_SIZE = 16 # Size of each square in the checkerboard
-            
-
-            # For patterns that are constant vertically, we generate the row once.
-            if pattern not in ["Vertical Gradient", "Checkerboard"]:
-                row_data = bytearray()
-
-                # Get colors from options with sensible defaults
-                if pattern == "Color Bars":
-                    colors_rgb = [
-                        (255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
-                        (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)
-                    ]
-                    bar_width = width / 8
-                elif pattern == "RGB Stripes":
-                    color1 = options.get('color1', (255, 0, 0))
-                    color2 = options.get('color2', (0, 255, 0))
-                    color3 = options.get('color3', (0, 0, 255))
-                    stripe1_end_x = width // 3
-                    stripe2_end_x = 2 * (width // 3)
-
-                for x in range(width):
-                    current_color_tuple_rgb = (0, 0, 0)
-                    if pattern == "Solid Color":
-                        current_color_tuple_rgb = options.get('color', (0, 0, 0))
-                    elif pattern == "RGB Stripes":
-                        if x < stripe1_end_x: current_color_tuple_rgb = color1
-                        elif x < stripe2_end_x: current_color_tuple_rgb = color2
-                        else: current_color_tuple_rgb = color3
-                    elif pattern == "Color Bars":
-                        bar_index = int(x // bar_width)
-                        current_color_tuple_rgb = colors_rgb[min(bar_index, 7)]
-                    elif pattern == "Grayscale Bars":
-                        # 8 bars from white to black
-                        bar_width = width / 8
-                        bar_index = int(x // bar_width)
-                        val = 255 - int(bar_index * (255 / 7))
-                        current_color_tuple_rgb = (val, val, val)
-                    elif pattern == "Horizontal Gradient":
-                        start_color = options.get('start_color', (0, 0, 0))
-                        end_color = options.get('end_color', (255, 255, 255))
-                        ratio = x / (width - 1) if width > 1 else 1.0
-                        r = int(start_color[0] * (1 - ratio) + end_color[0] * ratio)
-                        g = int(start_color[1] * (1 - ratio) + end_color[1] * ratio)
-                        b = int(start_color[2] * (1 - ratio) + end_color[2] * ratio)
-                        current_color_tuple_rgb = (r, g, b)
-
-                    row_data.extend(_pack_pixel(current_color_tuple_rgb, pixel_order))
-
-                full_row_bytes = bytes(row_data) + padding_bytes
-                for _ in range(height):
-                    f.write(full_row_bytes)
-
-            elif pattern == "Vertical Gradient":
-                start_color = options.get('start_color', (0, 0, 0))
-                end_color = options.get('end_color', (255, 255, 255))
-                for y in range(height):
-                    ratio = y / (height - 1) if height > 1 else 1.0
-                    r = int(start_color[0] * (1 - ratio) + end_color[0] * ratio)
-                    g = int(start_color[1] * (1 - ratio) + end_color[1] * ratio)
-                    b = int(start_color[2] * (1 - ratio) + end_color[2] * ratio)
-                    current_color_tuple_rgb = (r, g, b)
-                    pixel_bytes = _pack_pixel(current_color_tuple_rgb, pixel_order)
-                    f.write(pixel_bytes * width + padding_bytes)
-            
-            elif pattern == "Checkerboard":
-                color1 = options.get('color1', (255, 255, 255)) # Default White
-                color2 = options.get('color2', (0, 0, 0))       # Default Black
-                pixel1_bytes = _pack_pixel(color1, pixel_order)
-                pixel2_bytes = _pack_pixel(color2, pixel_order)
-
-                # Pre-generate the two possible row types for efficiency
-                row1_data = bytearray()
-                row2_data = bytearray()
-                for x in range(width):
-                    is_color1_in_row1 = (x // CHECKER_SIZE) % 2 == 0
-                    row1_data.extend(pixel1_bytes if is_color1_in_row1 else pixel2_bytes)
-                    row2_data.extend(pixel2_bytes if is_color1_in_row1 else pixel1_bytes)
-                row1_bytes = bytes(row1_data) + padding_bytes
-                row2_bytes = bytes(row2_data) + padding_bytes
-
-                for y in range(height):
-                    is_row1_type = (y // CHECKER_SIZE) % 2 == 0
-                    f.write(row1_bytes if is_row1_type else row2_bytes)
-
-        # If no exceptions were raised, generation is considered successful.
+            # The pixel order for BMP is BGR. If the user wants RGB, we need to swap.
+            # Our generator always yields standard RGB, so we handle the swap here.
+            for rgb_row in _generate_pixel_rows(width, height, pattern, options):
+                if pixel_order == "BGR":
+                    bgr_row = bytearray()
+                    for p in range(0, len(rgb_row), 3):
+                        r, g, b = rgb_row[p:p+3]
+                        bgr_row.extend((b, g, r))
+                    f.write(bgr_row + padding_bytes)
+                else: # RGB
+                    f.write(rgb_row + padding_bytes)
 
     except IOError as e:
         raise IOError(f"Error writing file '{filename}': {e}")
     except Exception as e:
         raise Exception(f"Unexpected error generating BMP file '{filename}': {e}")
+
+def generate_preview_data_for_put(width: int, height: int, pattern: str, pattern_options: dict | None = None) -> str:
+    """Generates pixel data in Tcl/Tk's list-of-lists-of-colors format for the .put() method."""
+    rows_of_colors = []
+    # The generator yields data row by row.
+    for row_bytes in _generate_pixel_rows(width, height, pattern, pattern_options):
+        # Format each row as a space-separated list of hex colors: #RRGGBB
+        # This is a highly efficient way to format the row using a generator expression.
+        row_str = " ".join(
+            f"#{row_bytes[i]:02x}{row_bytes[i+1]:02x}{row_bytes[i+2]:02x}"
+            for i in range(0, len(row_bytes), 3)
+        )
+        rows_of_colors.append("{" + row_str + "}")
+    # Join all rows into a single string, e.g., "{#... #...} {#... #...}"
+    return " ".join(rows_of_colors)
 
 def _prompt_for_color(prompt_text: str) -> tuple[int, int, int]:
     """Helper function for CLI to prompt for an RGB color."""
@@ -339,12 +340,18 @@ class BmpGeneratorApp:
         self.pixel_order_combo.grid(row=3, column=1, sticky="ew", pady=2)
 
         # Frame for the generate button
-        button_frame = ttk.Frame(master, padding="10 0 10 10")
+        button_frame = ttk.Frame(master, padding="10 5 10 10") # type: ignore
         button_frame.grid(row=2, column=0, sticky="ew")
+        button_frame.grid_columnconfigure(0, weight=1)
+        button_frame.grid_columnconfigure(1, weight=1)
+
+        # Preview Button
+        self.preview_button = ttk.Button(button_frame, text="Preview", command=self.show_preview)
+        self.preview_button.grid(row=0, column=0, padx=5, sticky="e")
 
         # Generate button
         self.generate_button = ttk.Button(button_frame, text="Generate BMP", command=self.trigger_generate_bmp) # Generate BMP
-        self.generate_button.pack(expand=True, pady=5) # Use pack to center button
+        self.generate_button.grid(row=0, column=1, padx=5, sticky="w")
 
         # Configure column weights for proper resizing behavior within input_frame
         input_frame.grid_columnconfigure(1, weight=1)
@@ -368,8 +375,8 @@ class BmpGeneratorApp:
             for frame in self.option_frames[selected_pattern]:
                 frame.pack(anchor="w", pady=2, fill="x")
 
-    def trigger_generate_bmp(self):
-        """Handles the 'Generate BMP' button click event."""
+    def _collect_and_validate_inputs(self):
+        """Validates all user inputs and collects them into a tuple."""
         try:
             width_str = self.width_var.get()
             height_str = self.height_var.get()
@@ -378,17 +385,15 @@ class BmpGeneratorApp:
             pattern_options = {}
 
             if not width_str or not height_str:
-                messagebox.showerror("Input Error: Width and height cannot be empty.") # Input Error: Width and height cannot be empty.
-                return
+                messagebox.showerror("Input Error", "Width and height cannot be empty.")
+                return None
 
             width = int(width_str)
             height = int(height_str)
 
-            # Basic positive check here for quick GUI feedback,
-            # generate_bmp will do more thorough validation.
             if not (width > 0 and height > 0):
-                 messagebox.showerror("Input Error: Width and height must be positive integers.") # Input Error: Width and height must be positive integers.
-                 return
+                 messagebox.showerror("Input Error", "Width and height must be positive integers.")
+                 return None
 
             # Collect colors from the visible option frames
             if pattern in self.option_frames:
@@ -405,12 +410,53 @@ class BmpGeneratorApp:
                     b = int(frames[i].b_var.get())
                     if not all(0 <= c <= 255 for c in [r, g, b]):
                         messagebox.showerror("Invalid Color", f"Values for '{key}' must be integers between 0 and 255.")
-                        return
+                        return None
                     pattern_options[key] = (r, g, b)
+
+            return width, height, pattern, pixel_order, pattern_options
 
         except ValueError: # Catches int conversion error
             messagebox.showerror("Invalid Input", "Width, height, and color values must be valid integers.")
+            return None
+
+    def show_preview(self):
+        """Generates and displays a preview of the selected pattern."""
+        inputs = self._collect_and_validate_inputs()
+        if not inputs:
             return
+
+        width, height, pattern, _, pattern_options = inputs
+
+        preview_window = tk.Toplevel(self.master)
+        preview_window.title(f"Preview: {pattern} ({width}x{height})")
+        preview_window.resizable(False, False)
+
+        try:
+            # PhotoImage can be slow for large images, so we can cap the preview size
+            preview_w, preview_h = min(width, 400), min(height, 300)
+            
+            # Generate data in the specific format required by the .put() method
+            pixel_data_for_put = generate_preview_data_for_put(preview_w, preview_h, pattern, pattern_options)
+            
+            # Keep a reference to the image to prevent garbage collection
+            # Create a blank image and then 'put' the data onto it. This is more robust than PPM.
+            self.preview_image = tk.PhotoImage(width=preview_w, height=preview_h)
+            self.preview_image.put(pixel_data_for_put)
+
+            preview_label = ttk.Label(preview_window, image=self.preview_image)
+            preview_label.pack()
+
+        except Exception as e:
+            preview_window.destroy()
+            messagebox.showerror("Preview Error", f"Could not generate preview:\n{e}")
+
+    def trigger_generate_bmp(self):
+        """Handles the 'Generate BMP' button click event."""
+        inputs = self._collect_and_validate_inputs()
+        if not inputs:
+            return
+
+        width, height, pattern, pixel_order, pattern_options = inputs
 
         safe_pattern_name = pattern.lower().replace(' ', '_')
         suggested_filename = f"{safe_pattern_name}_{width}x{height}_{pixel_order}.bmp"
